@@ -22,7 +22,10 @@ pip install uv
 pipx install uv
 ```
 
-
+requirements 설치
+```bash
+uv pip install requirements.txt
+```
 
 
 
