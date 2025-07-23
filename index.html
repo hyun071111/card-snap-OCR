@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8">
+    <title>TEST</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding-top: 2rem; }
+        video { border: 1px solid #ccc; border-radius: 8px; }
+        button { font-size: 1.2rem; padding: 10px 20px; margin-top: 1rem; cursor: pointer; border-radius: 8px; border: none; background-color: #007bff; color: white; }
+        pre { margin-top: 1rem; padding: 1rem; background-color: #f4f4f4; border: 1px solid #ddd; border-radius: 8px; width: 400px; white-space: pre-wrap; word-wrap: break-word; }
+    </style>
+</head>
+<body>
+    <h1>테스트</h1>
+    <video id="video" width="400" autoplay></video><br>
+    <button id="snap">캡처 & OCR</button>
+    <canvas id="canvas" width="400" height="300" style="display:none;"></canvas>
+    <pre id="result">여기 결과가 표시됩니다.</pre>
+
+    <script>
+        const video = document.getElementById('video');
+        const resultElement = document.getElementById('result');
+
+        // 웹캠 스트림 가져오기
+        navigator.mediaDevices.getUserMedia({ video: { width: 400, height: 300 } })
+            .then(stream => {
+                video.srcObject = stream;
+            })
+            .catch(err => {
+                console.error("카메라에 접근할 수 없습니다:", err);
+                resultElement.textContent = "카메라에 접근할 수 없습니다. 권한을 확인해주세요.";
+            });
+
+        // 캡처 버튼 클릭 이벤트
+        document.getElementById('snap').onclick = () => {
+            const canvas = document.getElementById('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            resultElement.textContent = 'OCR 처리 중...';
+
+            canvas.toBlob(blob => {
+                const formData = new FormData();
+                formData.append('file', blob, 'card.png');
+
+                // 서버로 이미지 전송 및 OCR 요청
+                fetch('http://127.0.0.1:8005/api/ocr', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP 오류! 상태: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    // 성공적으로 결과를 받으면 화면에 표시
+                    resultElement.textContent = JSON.stringify(data, null, 2);
+                    console.log(data.raw_text)
+                })
+                .catch(error => {
+                    // 예외처리
+                    console.error('OCR 요청 실패:', error);
+                    resultElement.textContent = '오류가 발생했습니다. 서버가 실행 중인지 확인하고 다시 시도해주세요.';
+                });
+            }, 'image/png');
+        };
+    </script>
+</body>
+</html>
