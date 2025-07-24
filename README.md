@@ -22,6 +22,11 @@ pip install uv
 pipx install uv
 ```
 
+가상환경 설정
+```bash
+uv venv --python 3.11.0
+```
+
 requirements 설치
 ```bash
 uv pip install requirements.txt
@@ -32,3 +37,5 @@ uv pip install requirements.txt
 *참고 자료*   
 - https://m.blog.naver.com/tommybee/221836206507
 - https://m.blog.naver.com/tommybee/221837611962?recommendTrackingCode=2
+- https://ahnanne.tistory.com/67
+- https://velog.io/@joongwon00/인턴-프로젝트-2.-EasyOCR을-써보자

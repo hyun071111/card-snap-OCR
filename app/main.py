@@ -6,12 +6,10 @@ import numpy as np
 import pytesseract
 import re
 import uvicorn
-import traceback
+import easyocr
 
-# FastAPI 앱 생성
 app = FastAPI()
 
-# CORS 미들웨어 추가 (브라우저에서 API를 호출할 수 있도록 허용)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,83 +18,158 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- 중요 ---
-# 사용자 환경에 맞게 Tesseract OCR 실행 파일 경로를 설정해야 합니다.
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+try:
+    pytesseract.pytesseract.tesseract_cmd = (
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    )
+except Exception:
+    print(
+        "Tesseract not found. Please set the correct path if not on Windows or if installed elsewhere."
+    )
+
+try:
+    reader = easyocr.Reader(["en", "ko"], gpu=False)
+except Exception as e:
+    print(f"EasyOCR 초기화 실패: {e}")
+    reader = None
+
+
+def rotate_image(image: np.ndarray) -> np.ndarray:
+    """이미지 방향을 자동으로 감지하고 보정"""
+    try:
+        osd = pytesseract.image_to_osd(image, output_type=pytesseract.Output.DICT)
+        rotation = osd["rotate"]
+        if rotation != 0:
+            if rotation == 90:
+                return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+            elif rotation == 180:
+                return cv2.rotate(image, cv2.ROTATE_180)
+            elif rotation == 270:
+                return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return image
+    except Exception as e:
+        print(f"Could not detect rotation, using original image. Error: {e}")
+        return image
 
 
 def ocr_card_image(image_bytes: bytes) -> dict:
-    """
-    이미지에서 카드 번호와 유효기간을 추출합니다.
-    관심 영역(ROI)을 찾아 인식률을 향상시키는 로직이 포함되어 있습니다.
-    """
+    """이미지 바이트를 받아 카드 번호와 유효 기간을 인식하는 함수"""
+    if reader is None:
+        return {"error": "EasyOCR is not initialized."}
+
     try:
-        # 1. 이미지 로드 및 기본 전처리
-        npimg = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(npimg, cv2.IMREAD_COLOR)
-        
-        h, w = img.shape[:2]
-        if h > w:
-            img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if img is None:
+            return {"error": "Failed to decode image."}
 
-        # 가우시안 블러로 노이즈 감소
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        img = rotate_image(img)
 
-        # 외곽선 찾기
-        contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        h, w, _ = img.shape
+        img_resized = cv2.resize(
+            img, (1000, int(h * 1000 / w)), interpolation=cv2.INTER_LANCZOS4
+        )
+        gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
 
-        card_number_roi = None
-        
-        # 3. 찾은 외곽선 중 카드 번호 영역으로 추정되는 부분을 필터링
-        for cnt in contours:
-            x, y, w, h = cv2.boundingRect(cnt)
-            aspect_ratio = w / float(h)
-            
-            # 숫자 그룹의 특징(가로로 김, 적절한 크기)을 기반으로 필터링
-            if aspect_ratio > 3.0 and 100 < w < 500 and 20 < h < 80:
-                # ROI(관심 영역)를 원본 gray 이미지에서 잘라냄
-                card_number_roi = gray[y:y+h, x:x+w]
-                break
-        
-        text = ""
-        if card_number_roi is not None:
-            _, roi_thresh = cv2.threshold(card_number_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789'
-            text = pytesseract.image_to_string(roi_thresh, config=config)
-        else:
-            config = r'--psm 6 -c tessedit_char_whitelist=0123456789/'
-            text = pytesseract.image_to_string(gray, config=config)
+        card_number = "인식 실패"
+        expiry_date = "인식 실패"
 
-        # 5. 정규 표현식으로 정보 추출
-        # OCR 결과에서 공백 등 숫자가 아닌 문자를 모두 제거
-        digits_only = re.sub(r'\D', '', text)
-        card_number = digits_only[:16] if len(digits_only) >= 16 else digits_only
-        
-        # 유효기간은 ROI가 아닌 전체 이미지에서 찾는 것이 더 안정적일 수 있음
-        full_text_for_expiry = pytesseract.image_to_string(gray, config=r'--psm 6 -c tessedit_char_whitelist=0123456789/')
-        expiry_match = re.search(r'\b(0[1-9]|1[0-2])\s?/?\s?(\d{2})\b', full_text_for_expiry)
-        expiry_date = f"{expiry_match.group(1)}/{expiry_match.group(2)}" if expiry_match else None
+        # EasyOCR로 텍스트와 위치 정보(바운딩 박스)를 함께 추출
+        results = reader.readtext(gray, detail=1)
+
+        # 1. 카드 번호 위치 탐색 및 추출
+        card_number_box = None
+        for bbox, text, prob in results:
+            cleaned_text = re.sub(r"\D", "", text)
+            if len(cleaned_text) >= 15 and is_luhn_valid(cleaned_text):
+                # Luhn 알고리즘을 통과하는 15자리 이상의 번호를 카드 번호로 확정
+                card_number = cleaned_text
+                card_number_box = bbox
+                break  # 가장 먼저 찾은 유효한 번호를 사용
+
+        # 2. 유효기간 지능형 탐색 (카드 번호를 찾았을 경우)
+        if card_number_box:
+            # 카드 번호 영역 바로 아래를 ROI(관심 영역)로 설정
+            top_left = card_number_box[0]
+            bottom_right = card_number_box[2]
+
+            # Y좌표는 카드번호 바로 아래부터, X좌표는 카드번호와 비슷하게 설정
+            roi_y_start = int(bottom_right[1])
+            roi_y_end = int(
+                bottom_right[1] + (bottom_right[1] - top_left[1]) * 2
+            )  # ROI 높이는 카드번호 높이의 2배
+            roi_x_start = int(top_left[0] - 20)  # 약간의 여유 공간
+            roi_x_end = int(bottom_right[0] + 20)
+
+            date_roi = gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
+
+            # 작게 잘라낸 유효기간 영역에 대해서만 Tesseract OCR 수행
+            if date_roi.size > 0:
+                conf_tess_date = r"--oem 3 --psm 7"  # 단일 텍스트 라인으로 취급
+                date_text = pytesseract.image_to_string(date_roi, config=conf_tess_date)
+                expiry_match = re.search(
+                    r"\b(0[1-9]|1[0-2])\s?\/?\s?(\d{2})\b", date_text
+                )
+                if expiry_match:
+                    expiry_date = f"{expiry_match.group(1)}/{expiry_match.group(2)}"
+
+        # 3. Fallback: 만약 위 방법으로 정보를 못 찾았다면, 전체 텍스트에서 다시 검색
+        if card_number == "인식 실패" or expiry_date == "인식 실패":
+            combined_text = "\n".join(
+                [res[1] for res in results]
+            )  # EasyOCR 결과만으로 재구성
+
+            if card_number == "인식 실패":
+                digits_only = re.sub(r"\D", "", combined_text)
+                matches = re.findall(r"(\d{15,16})", digits_only)
+                if matches:
+                    valid_numbers = [num for num in matches if is_luhn_valid(num)]
+                    if valid_numbers:
+                        card_number = max(valid_numbers, key=len)
+                    else:
+                        card_number = max(matches, key=len)
+
+            if expiry_date == "인식 실패":
+                fallback_match = re.search(
+                    r"\b(0[1-9]|1[0-2])\s?\/?\s?(\d{2})\b", combined_text
+                )
+                if fallback_match:
+                    expiry_date = f"{fallback_match.group(1)}/{fallback_match.group(2)}"
 
         return {
-            "card_number": card_number if card_number else "인식 실패",
+            "card_number": card_number,
             "expiry_date": expiry_date,
-            "raw_text": text.strip()
+            "raw_text_combined": "\n".join([res[1] for res in results]).strip(),
         }
 
     except Exception as e:
-        # 서버에서 오류 발생 시, 원인 파악을 위해 터미널에 로그 출력
-        print("OCR 함수에서 오류 발생 !!!!!!!!!!!!")
-        traceback.print_exc()
-        return {"error": str(e)}
+        return {
+            "error": "An unexpected error occurred during OCR processing.",
+            "detail": str(e),
+        }
 
 
-@app.post("/api/ocr")
-async def extract_card_info(file: UploadFile = File(...)):
-    image_data = await file.read()
-    result = ocr_card_image(image_data)
+def is_luhn_valid(card_number: str) -> bool:
+    """Luhn 알고리즘(Modulus 10)으로 카드 번호 유효성 검사"""
+    try:
+        num_digits, s = len(card_number), 0
+        for i, digit_char in enumerate(card_number):
+            digit = int(digit_char)
+            if (i % 2) == (num_digits % 2):
+                digit *= 2
+            if digit > 9:
+                digit -= 9
+            s += digit
+        return (s % 10) == 0
+    except (ValueError, TypeError):
+        return False
+
+
+@app.post("/api/ocr", tags=["Image OCR"])
+async def extract_card_info_from_image(file: UploadFile = File(...)):
+    image_bytes = await file.read()
+    result = ocr_card_image(image_bytes)
     return JSONResponse(content=result)
 
 

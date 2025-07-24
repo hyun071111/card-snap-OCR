@@ -1,74 +1,206 @@
 <!DOCTYPE html>
 <html lang="ko">
+
 <head>
     <meta charset="utf-8">
-    <title>TEST</title>
+    <title>카드 스캐너</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding-top: 2rem; }
-        video { border: 1px solid #ccc; border-radius: 8px; }
-        button { font-size: 1.2rem; padding: 10px 20px; margin-top: 1rem; cursor: pointer; border-radius: 8px; border: none; background-color: #007bff; color: white; }
-        pre { margin-top: 1rem; padding: 1rem; background-color: #f4f4f4; border: 1px solid #ddd; border-radius: 8px; width: 400px; white-space: pre-wrap; word-wrap: break-word; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 1rem;
+            margin: 0;
+            background: #f0f2f5;
+            color: #1c1e21;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .video-wrapper {
+            position: relative;
+            width: 100%;
+            max-width: 600px;
+            aspect-ratio: 16/10;
+            background: #000;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-top: 1rem;
+            width: 100%;
+            max-width: 600px;
+        }
+
+        .controls button {
+            flex-grow: 1;
+            padding: 0.8rem;
+            font-size: 1rem;
+            font-weight: 600;
+            border: none;
+            border-radius: 8px;
+            background-color: #007bff;
+            color: #fff;
+            cursor: pointer;
+            transition: background-color 0.2s, opacity 0.2s;
+        }
+
+        .controls button:hover {
+            background-color: #0056b3;
+        }
+
+        .controls button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+            opacity: 0.7;
+        }
+
+        #snap {
+            background-color: #28a745;
+        }
+
+        #snap:hover {
+            background-color: #1e7e34;
+        }
+
+        pre {
+            width: 100%;
+            max-width: 600px;
+            background-color: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1rem;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: "SF Mono", "Menlo", "Monaco", monospace;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
     </style>
 </head>
+
 <body>
-    <h1>테스트</h1>
-    <video id="video" width="400" autoplay></video><br>
-    <button id="snap">캡처 & OCR</button>
-    <canvas id="canvas" width="400" height="300" style="display:none;"></canvas>
-    <pre id="result">여기 결과가 표시됩니다.</pre>
+    <h1>카드 스캐너</h1>
+
+    <div class="video-wrapper">
+        <video id="video" autoplay playsinline></video>
+    </div>
+
+    <div class="controls">
+        <button id="front">전면</button>
+        <button id="rear">후면</button>
+        <button id="snap">캡처 & 분석</button>
+    </div>
+
+    <canvas id="canvas" style="display:none;"></canvas>
+    <pre id="result">카메라를 카드에 맞춰주세요.</pre>
 
     <script>
+        // --- 설정 ---
+        // 백엔드 서버의 주소를 정확하게 입력해주세요.
+        const API_ENDPOINT = 'https://localhost:8001/api/ocr';
+
+        // --- 요소 가져오기 ---
         const video = document.getElementById('video');
         const resultElement = document.getElementById('result');
+        const btnFront = document.getElementById('front');
+        const btnRear = document.getElementById('rear');
+        const btnSnap = document.getElementById('snap');
 
-        // 웹캠 스트림 가져오기
-        navigator.mediaDevices.getUserMedia({ video: { width: 400, height: 300 } })
-            .then(stream => {
+        let currentStream = null;
+
+        // --- 함수 정의 ---
+        function stopStream() {
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+        }
+
+        async function startCamera(facingMode = 'environment') {
+            stopStream();
+            const constraints = { video: { facingMode: { ideal: facingMode } } };
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 video.srcObject = stream;
-            })
-            .catch(err => {
-                console.error("카메라에 접근할 수 없습니다:", err);
-                resultElement.textContent = "카메라에 접근할 수 없습니다. 권한을 확인해주세요.";
-            });
+                currentStream = stream;
+                resultElement.textContent = "준비 완료. 카드를 중앙에 맞추고 '캡처 & 분석' 버튼을 누르세요.";
+            } catch (err) {
+                console.error("카메라 접근 실패:", err);
+                resultElement.textContent = `카메라 접근 실패: ${err.name}\n\nHTTPS 환경에서 실행 중인지, 카메라 권한을 허용했는지 확인해주세요.`;
+            }
+        }
 
-        // 캡처 버튼 클릭 이벤트
-        document.getElementById('snap').onclick = () => {
+        async function handleSnap() {
+            if (!currentStream) {
+                resultElement.textContent = "카메라가 활성화되지 않았습니다.";
+                return;
+            }
+
+            // 처리 중 버튼 비활성화
+            btnSnap.disabled = true;
+            btnSnap.textContent = '처리 중...';
+            resultElement.textContent = '이미지 캡처 및 서버 전송 중...';
+
             const canvas = document.getElementById('canvas');
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
+            canvas.getContext('2d').drawImage(video, 0, 0);
 
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-            resultElement.textContent = 'OCR 처리 중...';
-
-            canvas.toBlob(blob => {
+            canvas.toBlob(async (blob) => {
                 const formData = new FormData();
-                formData.append('file', blob, 'card.png');
+                formData.append('file', blob, 'capture.png');
 
-                // 서버로 이미지 전송 및 OCR 요청
-                fetch('http://127.0.0.1:8005/api/ocr', {
-                    method: 'POST',
-                    body: formData
-                })
-                .then(response => {
+                try {
+                    const response = await fetch(API_ENDPOINT, {
+                        method: 'POST',
+                        body: formData
+                    });
+
                     if (!response.ok) {
-                        throw new Error(`HTTP 오류! 상태: ${response.status}`);
+                        throw new Error(`서버 오류: ${response.status} ${response.statusText}`);
                     }
-                    return response.json();
-                })
-                .then(data => {
-                    // 성공적으로 결과를 받으면 화면에 표시
-                    resultElement.textContent = JSON.stringify(data, null, 2);
-                    console.log(data.raw_text)
-                })
-                .catch(error => {
-                    // 예외처리
-                    console.error('OCR 요청 실패:', error);
-                    resultElement.textContent = '오류가 발생했습니다. 서버가 실행 중인지 확인하고 다시 시도해주세요.';
-                });
+
+                    const data = await response.json();
+                    resultElement.textContent = `[인식 결과]\n\n카드 번호: ${data.card_number || 'N/A'}\n유효 기간: ${data.expiry_date || 'N/A'}\n\n--- Raw Data ---\n${JSON.stringify(data, null, 2)}`;
+
+                } catch (err) {
+                    console.error('OCR 요청 실패:', err);
+                    resultElement.textContent = `오류 발생: ${err.message}\n\n서버 주소가 올바른지, 서버가 실행 중인지 확인해주세요.`;
+                } finally {
+                    // 완료 후 버튼 다시 활성화
+                    btnSnap.disabled = false;
+                    btnSnap.textContent = '캡처 & 분석';
+                }
             }, 'image/png');
-        };
+        }
+
+        // --- 이벤트 리스너 ---
+        btnFront.onclick = () => startCamera('user');
+        btnRear.onclick = () => startCamera('environment');
+        btnSnap.onclick = handleSnap;
+
+        // 페이지 로드 시 후면 카메라로 자동 시작
+        startCamera('environment');
     </script>
 </body>
+
 </html>
