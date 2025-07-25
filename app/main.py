@@ -53,7 +53,7 @@ def rotate_image(image: np.ndarray) -> np.ndarray:
 
 
 def ocr_card_image(image_bytes: bytes) -> dict:
-    """이미지 바이트를 받아 카드 번호와 유효 기간을 인식하는 함수"""
+    """Two-Pass OCR: 카드 번호를 먼저 찾고, 나머지 텍스트에서 유효기간을 탐색"""
     if reader is None:
         return {"error": "EasyOCR is not initialized."}
 
@@ -72,75 +72,46 @@ def ocr_card_image(image_bytes: bytes) -> dict:
         )
         gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
 
-        card_number = "인식 실패"
-        expiry_date = "인식 실패"
-
-        # EasyOCR로 텍스트와 위치 정보(바운딩 박스)를 함께 추출
+        # EasyOCR로 텍스트와 위치 정보 모두 추출
         results = reader.readtext(gray, detail=1)
 
-        # 1. 카드 번호 위치 탐색 및 추출
-        card_number_box = None
-        for bbox, text, prob in results:
+        card_number = "인식 실패"
+        expiry_date = "인식 실패"
+        card_number_index = -1
+
+        # 1단계: 카드 번호 탐색 및 분리
+        for i, (bbox, text, prob) in enumerate(results):
             cleaned_text = re.sub(r"\D", "", text)
             if len(cleaned_text) >= 15 and is_luhn_valid(cleaned_text):
-                # Luhn 알고리즘을 통과하는 15자리 이상의 번호를 카드 번호로 확정
                 card_number = cleaned_text
-                card_number_box = bbox
-                break  # 가장 먼저 찾은 유효한 번호를 사용
+                card_number_index = i
+                break
 
-        # 2. 유효기간 지능형 탐색 (카드 번호를 찾았을 경우)
-        if card_number_box:
-            # 카드 번호 영역 바로 아래를 ROI(관심 영역)로 설정
-            top_left = card_number_box[0]
-            bottom_right = card_number_box[2]
+        # 2단계: 유효기간 탐색 (카드 번호를 제외한 나머지 텍스트에서)
+        for i, (bbox, text, prob) in enumerate(results):
+            if i == card_number_index:
+                continue  # 카드 번호 텍스트는 건너뜀
 
-            # Y좌표는 카드번호 바로 아래부터, X좌표는 카드번호와 비슷하게 설정
-            roi_y_start = int(bottom_right[1])
-            roi_y_end = int(
-                bottom_right[1] + (bottom_right[1] - top_left[1]) * 2
-            )  # ROI 높이는 카드번호 높이의 2배
-            roi_x_start = int(top_left[0] - 20)  # 약간의 여유 공간
-            roi_x_end = int(bottom_right[0] + 20)
+            expiry_match = re.search(r"\b(0[1-9]|1[0-2])\s?\/?\s?(\d{2})\b", text)
+            if expiry_match:
+                # MM/YY 패턴이 발견되면 바로 사용
+                expiry_date = f"{expiry_match.group(1)}/{expiry_match.group(2)}"
+                break
 
-            date_roi = gray[roi_y_start:roi_y_end, roi_x_start:roi_x_end]
-
-            # 작게 잘라낸 유효기간 영역에 대해서만 Tesseract OCR 수행
-            if date_roi.size > 0:
-                conf_tess_date = r"--oem 3 --psm 7"  # 단일 텍스트 라인으로 취급
-                date_text = pytesseract.image_to_string(date_roi, config=conf_tess_date)
-                expiry_match = re.search(
-                    r"\b(0[1-9]|1[0-2])\s?\/?\s?(\d{2})\b", date_text
-                )
-                if expiry_match:
-                    expiry_date = f"{expiry_match.group(1)}/{expiry_match.group(2)}"
-
-        # 3. Fallback: 만약 위 방법으로 정보를 못 찾았다면, 전체 텍스트에서 다시 검색
-        if card_number == "인식 실패" or expiry_date == "인식 실패":
-            combined_text = "\n".join(
-                [res[1] for res in results]
-            )  # EasyOCR 결과만으로 재구성
-
-            if card_number == "인식 실패":
-                digits_only = re.sub(r"\D", "", combined_text)
-                matches = re.findall(r"(\d{15,16})", digits_only)
-                if matches:
-                    valid_numbers = [num for num in matches if is_luhn_valid(num)]
-                    if valid_numbers:
-                        card_number = max(valid_numbers, key=len)
-                    else:
-                        card_number = max(matches, key=len)
-
-            if expiry_date == "인식 실패":
-                fallback_match = re.search(
-                    r"\b(0[1-9]|1[0-2])\s?\/?\s?(\d{2})\b", combined_text
-                )
-                if fallback_match:
-                    expiry_date = f"{fallback_match.group(1)}/{fallback_match.group(2)}"
+        # 3. Fallback: 만약 Tesseract가 더 잘 읽을 경우를 대비한 최종 안전장치
+        if expiry_date == "인식 실패":
+            conf_tess = r"--oem 3 --psm 6"
+            tess_text = pytesseract.image_to_string(gray, config=conf_tess)
+            fallback_match = re.search(
+                r"\b(0[1-9]|1[0-2])\s?\/?\s?(\d{2})\b", tess_text
+            )
+            if fallback_match:
+                expiry_date = f"{fallback_match.group(1)}/{fallback_match.group(2)}"
 
         return {
             "card_number": card_number,
             "expiry_date": expiry_date,
-            "raw_text_combined": "\n".join([res[1] for res in results]).strip(),
+            "raw_text_easyocr": [res[1] for res in results],
         }
 
     except Exception as e:
